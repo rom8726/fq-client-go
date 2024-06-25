@@ -23,34 +23,35 @@ type CappingKey struct {
 }
 
 type Client struct {
-	client *TCPClient
+	pool *ConnectionPool
 }
 
-func New(address string, idleTimeout time.Duration) (*Client, error) {
-	client, err := NewTCPClient(address, 4096, idleTimeout)
-	if err != nil {
-		return nil, err
+func New(address string, idleTimeout time.Duration, poolSize int) (*Client, error) {
+	newConnFn := func() (*TCPClient, error) {
+		return NewTCPClient(address, 4096, idleTimeout)
 	}
 
-	c := &Client{
-		client: client,
+	pool := NewConnectionPool(poolSize, newConnFn)
+
+	conns := make([]*TCPClient, 0, poolSize)
+	for i := 0; i < poolSize; i++ {
+		c, err := pool.GetConnection()
+		if err != nil {
+			return nil, err
+		}
+
+		conns = append(conns, c)
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second*10)
-	defer cancel()
-
-	msgSize, err := c.msgSize(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get message size: %w", err)
+	for _, conn := range conns {
+		pool.ReleaseConnection(conn)
 	}
 
-	c.client.SetMaxMessageSizeUnsafe(msgSize)
-
-	return c, nil
+	return &Client{pool: pool}, nil
 }
 
-func (c *Client) Close() error {
-	return c.client.Close()
+func (c *Client) Close() {
+	c.pool.Close()
 }
 
 func (c *Client) Incr(ctx context.Context, key CappingKey) (uint64, error) {
@@ -59,7 +60,14 @@ func (c *Client) Incr(ctx context.Context, key CappingKey) (uint64, error) {
 
 	writeCommand(buf, CommandIncr, key)
 
-	resp, err := c.client.Send(ctx, buf.Bytes())
+	conn, err := c.pool.GetConnection()
+	if err != nil {
+		return 0, fmt.Errorf("connect: %w", err)
+	}
+
+	defer c.pool.ReleaseConnection(conn)
+
+	resp, err := conn.Send(ctx, buf.Bytes())
 	if err != nil {
 		return 0, fmt.Errorf("send: %w", err)
 	}
@@ -85,7 +93,14 @@ func (c *Client) Get(ctx context.Context, key CappingKey) (uint64, error) {
 
 	writeCommand(buf, CommandGet, key)
 
-	resp, err := c.client.Send(ctx, buf.Bytes())
+	conn, err := c.pool.GetConnection()
+	if err != nil {
+		return 0, fmt.Errorf("connect: %w", err)
+	}
+
+	defer c.pool.ReleaseConnection(conn)
+
+	resp, err := conn.Send(ctx, buf.Bytes())
 	if err != nil {
 		return 0, fmt.Errorf("send: %w", err)
 	}
@@ -111,7 +126,14 @@ func (c *Client) Del(ctx context.Context, key CappingKey) (bool, error) {
 
 	writeCommand(buf, CommandDel, key)
 
-	resp, err := c.client.Send(ctx, buf.Bytes())
+	conn, err := c.pool.GetConnection()
+	if err != nil {
+		return false, fmt.Errorf("connect: %w", err)
+	}
+
+	defer c.pool.ReleaseConnection(conn)
+
+	resp, err := conn.Send(ctx, buf.Bytes())
 	if err != nil {
 		return false, fmt.Errorf("send: %w", err)
 	}
@@ -139,7 +161,14 @@ func (c *Client) MDel(ctx context.Context, keys []CappingKey) ([]bool, error) {
 
 	writeMultiCommand(buf, CommandMDel, keys)
 
-	resp, err := c.client.Send(ctx, buf.Bytes())
+	conn, err := c.pool.GetConnection()
+	if err != nil {
+		return nil, fmt.Errorf("connect: %w", err)
+	}
+
+	defer c.pool.ReleaseConnection(conn)
+
+	resp, err := conn.Send(ctx, buf.Bytes())
 	if err != nil {
 		return nil, fmt.Errorf("send: %w", err)
 	}
@@ -156,27 +185,6 @@ func (c *Client) MDel(ctx context.Context, keys []CappingKey) ([]bool, error) {
 		return nil, result.err
 	default:
 		return nil, ErrUnknownRespStatus
-	}
-}
-
-func (c *Client) msgSize(ctx context.Context) (int, error) {
-	resp, err := c.client.Send(ctx, []byte(CommandMsgSize))
-	if err != nil {
-		return 0, fmt.Errorf("send: %w", err)
-	}
-
-	result, err := parseResponse(resp)
-	if err != nil {
-		return 0, fmt.Errorf("parse response: %w", err)
-	}
-
-	switch result.status {
-	case ResponseStatusSuccess:
-		return int(result.value), nil
-	case ResponseStatusError:
-		return 0, result.err
-	default:
-		return 0, ErrUnknownRespStatus
 	}
 }
 
@@ -214,4 +222,36 @@ func valuesToBools(values []uint64) []bool {
 	}
 
 	return bools
+}
+
+func getAndSetMsgSize(ctx context.Context, client *TCPClient) error {
+	sz, err := msgSize(ctx, client)
+	if err != nil {
+		return err
+	}
+
+	client.SetMaxMessageSizeUnsafe(sz)
+
+	return nil
+}
+
+func msgSize(ctx context.Context, client *TCPClient) (int, error) {
+	resp, err := client.Send(ctx, []byte(CommandMsgSize))
+	if err != nil {
+		return 0, fmt.Errorf("send: %w", err)
+	}
+
+	result, err := parseResponse(resp)
+	if err != nil {
+		return 0, fmt.Errorf("parse response: %w", err)
+	}
+
+	switch result.status {
+	case ResponseStatusSuccess:
+		return int(result.value), nil
+	case ResponseStatusError:
+		return 0, result.err
+	default:
+		return 0, ErrUnknownRespStatus
+	}
 }
