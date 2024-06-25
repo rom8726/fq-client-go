@@ -2,6 +2,7 @@
 package fq
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"strconv"
@@ -12,8 +13,14 @@ const (
 	CommandIncr    = "INCR"
 	CommandGet     = "GET"
 	CommandDel     = "DEL"
+	CommandMDel    = "MDEL"
 	CommandMsgSize = "MSGSIZE"
 )
+
+type CappingKey struct {
+	Key     string
+	Capping uint32
+}
 
 type Client struct {
 	client *TCPClient
@@ -46,17 +53,11 @@ func (c *Client) Close() error {
 	return c.client.Close()
 }
 
-func (c *Client) Incr(ctx context.Context, key string, capping uint32) (uint64, error) {
-	cappingStr := strconv.FormatUint(uint64(capping), 10)
-
+func (c *Client) Incr(ctx context.Context, key CappingKey) (uint64, error) {
 	buf := bytesBufferPool.Get()
 	defer bytesBufferPool.Put(buf)
 
-	buf.WriteString(CommandIncr)
-	buf.WriteByte(' ')
-	buf.WriteString(key)
-	buf.WriteByte(' ')
-	buf.WriteString(cappingStr)
+	writeCommand(buf, CommandIncr, key)
 
 	resp, err := c.client.Send(ctx, buf.Bytes())
 	if err != nil {
@@ -78,17 +79,11 @@ func (c *Client) Incr(ctx context.Context, key string, capping uint32) (uint64, 
 	}
 }
 
-func (c *Client) Get(ctx context.Context, key string, capping uint32) (uint64, error) {
-	cappingStr := strconv.FormatUint(uint64(capping), 10)
-
+func (c *Client) Get(ctx context.Context, key CappingKey) (uint64, error) {
 	buf := bytesBufferPool.Get()
 	defer bytesBufferPool.Put(buf)
 
-	buf.WriteString(CommandGet)
-	buf.WriteByte(' ')
-	buf.WriteString(key)
-	buf.WriteByte(' ')
-	buf.WriteString(cappingStr)
+	writeCommand(buf, CommandGet, key)
 
 	resp, err := c.client.Send(ctx, buf.Bytes())
 	if err != nil {
@@ -110,17 +105,11 @@ func (c *Client) Get(ctx context.Context, key string, capping uint32) (uint64, e
 	}
 }
 
-func (c *Client) Del(ctx context.Context, key string, capping uint32) (bool, error) {
-	cappingStr := strconv.FormatUint(uint64(capping), 10)
-
+func (c *Client) Del(ctx context.Context, key CappingKey) (bool, error) {
 	buf := bytesBufferPool.Get()
 	defer bytesBufferPool.Put(buf)
 
-	buf.WriteString(CommandDel)
-	buf.WriteByte(' ')
-	buf.WriteString(key)
-	buf.WriteByte(' ')
-	buf.WriteString(cappingStr)
+	writeCommand(buf, CommandDel, key)
 
 	resp, err := c.client.Send(ctx, buf.Bytes())
 	if err != nil {
@@ -144,6 +133,32 @@ func (c *Client) Del(ctx context.Context, key string, capping uint32) (bool, err
 	}
 }
 
+func (c *Client) MDel(ctx context.Context, keys []CappingKey) ([]bool, error) {
+	buf := bytesBufferPool.Get()
+	defer bytesBufferPool.Put(buf)
+
+	writeMultiCommand(buf, CommandMDel, keys)
+
+	resp, err := c.client.Send(ctx, buf.Bytes())
+	if err != nil {
+		return nil, fmt.Errorf("send: %w", err)
+	}
+
+	result, err := parseMultiResponse(resp)
+	if err != nil {
+		return nil, fmt.Errorf("parse response: %w", err)
+	}
+
+	switch result.status {
+	case ResponseStatusSuccess:
+		return valuesToBools(result.values), nil
+	case ResponseStatusError:
+		return nil, result.err
+	default:
+		return nil, ErrUnknownRespStatus
+	}
+}
+
 func (c *Client) msgSize(ctx context.Context) (int, error) {
 	resp, err := c.client.Send(ctx, []byte(CommandMsgSize))
 	if err != nil {
@@ -163,4 +178,40 @@ func (c *Client) msgSize(ctx context.Context) (int, error) {
 	default:
 		return 0, ErrUnknownRespStatus
 	}
+}
+
+func writeCommand(buf *bytes.Buffer, command string, key CappingKey) {
+	cappingStr := strconv.FormatUint(uint64(key.Capping), 10)
+
+	buf.WriteString(command)
+	buf.WriteByte(' ')
+	buf.WriteString(key.Key)
+	buf.WriteByte(' ')
+	buf.WriteString(cappingStr)
+}
+
+func writeMultiCommand(buf *bytes.Buffer, command string, keys []CappingKey) {
+	buf.WriteString(command)
+	buf.WriteByte(' ')
+
+	for i, key := range keys {
+		cappingStr := strconv.FormatUint(uint64(key.Capping), 10)
+
+		buf.WriteString(key.Key)
+		buf.WriteByte(' ')
+		buf.WriteString(cappingStr)
+
+		if i < len(keys)-1 {
+			buf.WriteByte(' ')
+		}
+	}
+}
+
+func valuesToBools(values []uint64) []bool {
+	bools := make([]bool, len(values))
+	for i, value := range values {
+		bools[i] = value == 1
+	}
+
+	return bools
 }
