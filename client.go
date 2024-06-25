@@ -4,6 +4,7 @@ package fq
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"strconv"
 	"time"
@@ -62,12 +63,12 @@ func (c *Client) Incr(ctx context.Context, key CappingKey) (uint64, error) {
 
 	conn, err := c.pool.GetConnection()
 	if err != nil {
-		return 0, fmt.Errorf("connect: %w", err)
+		return 0, fmt.Errorf("get connection: %w", err)
 	}
 
 	defer c.pool.ReleaseConnection(conn)
 
-	resp, err := conn.Send(ctx, buf.Bytes())
+	resp, err := sendWithReconnect(ctx, conn, buf.Bytes())
 	if err != nil {
 		return 0, fmt.Errorf("send: %w", err)
 	}
@@ -95,12 +96,12 @@ func (c *Client) Get(ctx context.Context, key CappingKey) (uint64, error) {
 
 	conn, err := c.pool.GetConnection()
 	if err != nil {
-		return 0, fmt.Errorf("connect: %w", err)
+		return 0, fmt.Errorf("get connection: %w", err)
 	}
 
 	defer c.pool.ReleaseConnection(conn)
 
-	resp, err := conn.Send(ctx, buf.Bytes())
+	resp, err := sendWithReconnect(ctx, conn, buf.Bytes())
 	if err != nil {
 		return 0, fmt.Errorf("send: %w", err)
 	}
@@ -128,12 +129,12 @@ func (c *Client) Del(ctx context.Context, key CappingKey) (bool, error) {
 
 	conn, err := c.pool.GetConnection()
 	if err != nil {
-		return false, fmt.Errorf("connect: %w", err)
+		return false, fmt.Errorf("get connection: %w", err)
 	}
 
 	defer c.pool.ReleaseConnection(conn)
 
-	resp, err := conn.Send(ctx, buf.Bytes())
+	resp, err := sendWithReconnect(ctx, conn, buf.Bytes())
 	if err != nil {
 		return false, fmt.Errorf("send: %w", err)
 	}
@@ -163,12 +164,12 @@ func (c *Client) MDel(ctx context.Context, keys []CappingKey) ([]bool, error) {
 
 	conn, err := c.pool.GetConnection()
 	if err != nil {
-		return nil, fmt.Errorf("connect: %w", err)
+		return nil, fmt.Errorf("get connection: %w", err)
 	}
 
 	defer c.pool.ReleaseConnection(conn)
 
-	resp, err := conn.Send(ctx, buf.Bytes())
+	resp, err := sendWithReconnect(ctx, conn, buf.Bytes())
 	if err != nil {
 		return nil, fmt.Errorf("send: %w", err)
 	}
@@ -254,4 +255,21 @@ func msgSize(ctx context.Context, client *TCPClient) (int, error) {
 	default:
 		return 0, ErrUnknownRespStatus
 	}
+}
+
+func sendWithReconnect(ctx context.Context, conn *TCPClient, data []byte) ([]byte, error) {
+	resp, err := conn.Send(ctx, data)
+	if err != nil {
+		if errors.Is(err, ErrConnClosed) {
+			if err := conn.Reconnect(); err != nil {
+				return nil, fmt.Errorf("reconnect: %w", err)
+			}
+
+			return conn.Send(ctx, data)
+		}
+
+		return nil, err
+	}
+
+	return resp, nil
 }

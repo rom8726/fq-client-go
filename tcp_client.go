@@ -2,13 +2,18 @@ package fq
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io"
 	"net"
 	"time"
 )
 
+var ErrConnClosed = errors.New("connection closed by server")
+
 type TCPClient struct {
 	connection     net.Conn
+	address        string
 	maxMessageSize int
 	idleTimeout    time.Duration
 	bufferPool     *bytesPool
@@ -22,6 +27,7 @@ func NewTCPClient(address string, maxMessageSize int, idleTimeout time.Duration)
 
 	return &TCPClient{
 		connection:     connection,
+		address:        address,
 		maxMessageSize: maxMessageSize,
 		idleTimeout:    idleTimeout,
 		bufferPool:     newBytesPool(maxMessageSize),
@@ -46,6 +52,10 @@ func (c *TCPClient) Send(ctx context.Context, request []byte) ([]byte, error) {
 
 	count, err := c.connection.Read(response)
 	if err != nil {
+		if err == io.EOF {
+			return nil, ErrConnClosed
+		}
+
 		return nil, err
 	}
 
@@ -62,6 +72,19 @@ func (c *TCPClient) Close() error {
 func (c *TCPClient) SetMaxMessageSizeUnsafe(size int) {
 	c.maxMessageSize = size
 	c.bufferPool = newBytesPool(size)
+}
+
+func (c *TCPClient) Reconnect() error {
+	_ = c.connection.Close()
+
+	connection, err := net.Dial("tcp", c.address)
+	if err != nil {
+		return err
+	}
+
+	c.connection = connection
+
+	return nil
 }
 
 func (c *TCPClient) deadline(ctx context.Context) time.Time {
