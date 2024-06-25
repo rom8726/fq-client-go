@@ -225,38 +225,6 @@ func valuesToBools(values []uint64) []bool {
 	return bools
 }
 
-func getAndSetMsgSize(ctx context.Context, client *TCPClient) error {
-	sz, err := msgSize(ctx, client)
-	if err != nil {
-		return err
-	}
-
-	client.SetMaxMessageSizeUnsafe(sz)
-
-	return nil
-}
-
-func msgSize(ctx context.Context, client *TCPClient) (int, error) {
-	resp, err := client.Send(ctx, []byte(CommandMsgSize))
-	if err != nil {
-		return 0, fmt.Errorf("send: %w", err)
-	}
-
-	result, err := parseResponse(resp)
-	if err != nil {
-		return 0, fmt.Errorf("parse response: %w", err)
-	}
-
-	switch result.status {
-	case ResponseStatusSuccess:
-		return int(result.value), nil
-	case ResponseStatusError:
-		return 0, result.err
-	default:
-		return 0, ErrUnknownRespStatus
-	}
-}
-
 func sendWithReconnect(ctx context.Context, conn *TCPClient, data []byte) ([]byte, error) {
 	resp, err := conn.Send(ctx, data)
 	if err != nil {

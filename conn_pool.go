@@ -1,12 +1,10 @@
 package fq
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"sync"
 	"sync/atomic"
-	"time"
 )
 
 var ErrConnPoolClosed = errors.New("connection pool closed")
@@ -45,16 +43,6 @@ func (cp *ConnectionPool) GetConnection() (*TCPClient, error) {
 			cp.wg.Done()
 
 			return nil, fmt.Errorf("new connection: %w", err)
-		}
-
-		ctx, cancel := context.WithTimeout(context.Background(), time.Second*5)
-		defer cancel()
-
-		err = getAndSetMsgSize(ctx, conn)
-		if err != nil {
-			cp.wg.Done()
-
-			return nil, fmt.Errorf("get and set msg size: %w", err)
 		}
 	}
 

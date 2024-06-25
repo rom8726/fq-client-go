@@ -25,13 +25,22 @@ func NewTCPClient(address string, maxMessageSize int, idleTimeout time.Duration)
 		return nil, fmt.Errorf("failed to dial: %w", err)
 	}
 
-	return &TCPClient{
+	c := &TCPClient{
 		connection:     connection,
 		address:        address,
 		maxMessageSize: maxMessageSize,
 		idleTimeout:    idleTimeout,
 		bufferPool:     newBytesPool(maxMessageSize),
-	}, nil
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second*5)
+	defer cancel()
+
+	if err := c.getAndSetMsgSize(ctx); err != nil {
+		return nil, fmt.Errorf("failed to set msg size: %w", err)
+	}
+
+	return c, nil
 }
 
 func (c *TCPClient) Send(ctx context.Context, request []byte) ([]byte, error) {
@@ -52,7 +61,7 @@ func (c *TCPClient) Send(ctx context.Context, request []byte) ([]byte, error) {
 
 	count, err := c.connection.Read(response)
 	if err != nil {
-		if err == io.EOF {
+		if errors.Is(err, io.EOF) || errors.Is(err, net.ErrClosed) {
 			return nil, ErrConnClosed
 		}
 
@@ -99,4 +108,36 @@ func (c *TCPClient) deadline(ctx context.Context) time.Time {
 	}
 
 	return deadline
+}
+
+func (c *TCPClient) getAndSetMsgSize(ctx context.Context) error {
+	sz, err := msgSize(ctx, c)
+	if err != nil {
+		return err
+	}
+
+	c.SetMaxMessageSizeUnsafe(sz)
+
+	return nil
+}
+
+func msgSize(ctx context.Context, client *TCPClient) (int, error) {
+	resp, err := client.Send(ctx, []byte(CommandMsgSize))
+	if err != nil {
+		return 0, fmt.Errorf("send: %w", err)
+	}
+
+	result, err := parseResponse(resp)
+	if err != nil {
+		return 0, fmt.Errorf("parse response: %w", err)
+	}
+
+	switch result.status {
+	case ResponseStatusSuccess:
+		return int(result.value), nil
+	case ResponseStatusError:
+		return 0, result.err
+	default:
+		return 0, ErrUnknownRespStatus
+	}
 }
